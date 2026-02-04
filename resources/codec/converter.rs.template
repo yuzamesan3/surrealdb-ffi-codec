@@ -1,0 +1,395 @@
+//! SurrealDB Value <-> MessagePack Value converter
+//!
+//! This module provides manual conversion between SurrealDB's internal sql::Value
+//! and MessagePack's rmpv::Value, avoiding JSON serialization entirely.
+//!
+//! # Key Features
+//!
+//! - Zero JSON overhead
+//! - TypeHints for field-level type conversion
+//! - Support for datetime and record type hints
+//! - Recursive conversion for nested structures
+
+use chrono::DateTime;
+use rmpv::Value;
+use std::collections::{HashMap, HashSet};
+use surrealdb::sql;
+
+/// Type hints for parameter conversion.
+///
+/// Allows clients to specify how string parameters should be converted
+/// to SurrealDB native types (datetime, record, etc.).
+///
+/// # Example
+///
+/// ```ignore
+/// let hints = TypeHints::parse(&[
+///     "created_at",                    // datetime field
+///     "datetime:updated_at",           // explicit datetime
+///     "record:user:owner_id",          // record<user> field
+/// ]);
+/// ```
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TypeHints {
+    /// Field names to convert to datetime (RFC3339 string -> sql::Datetime)
+    pub datetime_fields: HashSet<String>,
+    /// Field names to convert to record<table> (field_name -> table_name)
+    pub record_fields: HashMap<String, String>,
+    /// Set of fields that have already emitted a conflict warning
+    #[serde(skip)]
+    pub warned_conflicts: std::sync::Mutex<HashSet<String>>,
+}
+
+impl Default for TypeHints {
+    fn default() -> Self {
+        Self {
+            datetime_fields: HashSet::new(),
+            record_fields: HashMap::new(),
+            warned_conflicts: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+}
+
+impl TypeHints {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create TypeHints from datetime fields only (backward compatibility)
+    pub fn from_datetime_fields(fields: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            datetime_fields: fields.into_iter().collect(),
+            record_fields: HashMap::new(),
+            warned_conflicts: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Create TypeHints from reference to datetime fields set
+    pub fn from_datetime_fields_ref(fields: &HashSet<String>) -> Self {
+        Self {
+            datetime_fields: fields.clone(),
+            record_fields: HashMap::new(),
+            warned_conflicts: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Parse type hints from a list of hint strings.
+    ///
+    /// # Format
+    ///
+    /// - `"field_name"` or `"datetime:field_name"` -> datetime field
+    /// - `"record:table_name:field_name"` -> record field for specified table
+    ///
+    /// # Constraints
+    ///
+    /// Hint strings must NOT contain colons in table or field names.
+    pub fn parse(hints: &[String]) -> Self {
+        let mut datetime_fields = HashSet::new();
+        let mut record_fields = HashMap::new();
+
+        for hint in hints {
+            let parts: Vec<&str> = hint.splitn(3, ':').collect();
+
+            if parts.iter().any(|p| p.is_empty()) {
+                log::warn!("Invalid type hint (empty parts): {}", hint);
+                continue;
+            }
+
+            match parts.as_slice() {
+                // Legacy format: just field name means datetime
+                [field] => {
+                    datetime_fields.insert(field.to_string());
+                }
+                // Explicit datetime format: datetime:field
+                ["datetime", field] => {
+                    datetime_fields.insert(field.to_string());
+                }
+                // Record format: record:table:field
+                ["record", table, field] => {
+                    if table.contains(':') || field.contains(':') {
+                        log::warn!("Invalid record hint: extra ':' in table/field: {}", hint);
+                        continue;
+                    }
+                    record_fields.insert(field.to_string(), table.to_string());
+                }
+                _ => {
+                    log::warn!("Invalid type hint format: {}", hint);
+                }
+            }
+        }
+
+        Self {
+            datetime_fields,
+            record_fields,
+            warned_conflicts: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.datetime_fields.is_empty() && self.record_fields.is_empty()
+    }
+}
+
+/// Convert a SurrealDB SQL Value into a MessagePack Value.
+///
+/// This manual conversion avoids issues with serde serialization of internal
+/// SurrealDB types (like Enums).
+pub fn from_surreal_value(v: sql::Value) -> Result<Value, String> {
+    match v {
+        sql::Value::None | sql::Value::Null => Ok(Value::Nil),
+        sql::Value::Bool(b) => Ok(Value::Boolean(b)),
+        sql::Value::Number(n) => convert_number(n),
+        sql::Value::Strand(s) => Ok(Value::String(s.as_str().into())),
+        sql::Value::Duration(d) => Ok(Value::String(d.to_string().into())),
+        sql::Value::Datetime(d) => {
+            // Remove SurrealDB format `d'...'` to return raw RFC3339 string
+            let s = d.to_string();
+            let clean_s = if s.starts_with("d'") && s.ends_with("'") {
+                &s[2..s.len() - 1]
+            } else {
+                &s
+            };
+            Ok(Value::String(clean_s.to_string().into()))
+        }
+        sql::Value::Uuid(u) => Ok(Value::String(u.to_string().into())),
+        sql::Value::Array(a) => {
+            let list: Result<Vec<Value>, String> = a.into_iter().map(from_surreal_value).collect();
+            Ok(Value::Array(list?))
+        }
+        sql::Value::Object(o) => {
+            let map: Result<Vec<(Value, Value)>, String> = o
+                .into_iter()
+                .map(|(k, v)| Ok((Value::String(k.into()), from_surreal_value(v)?)))
+                .collect();
+            Ok(Value::Map(map?))
+        }
+        sql::Value::Thing(t) => {
+            // Extract ID part and remove SurrealDB 2.x brackets (U+27E8 and U+27E9)
+            let s = match &t.id {
+                sql::Id::String(s) => s.clone(),
+                _ => t.id.to_string(),
+            };
+            let clean_s = s.trim_matches(|c| c == '\u{27E8}' || c == '\u{27E9}').to_string();
+            Ok(Value::String(clean_s.into()))
+        }
+        sql::Value::Bytes(b) => Ok(Value::Binary(b.into_inner())),
+        // For everything else, use string representation
+        _ => Ok(Value::String(v.to_string().into())),
+    }
+}
+
+fn convert_number(n: sql::Number) -> Result<Value, String> {
+    match n {
+        sql::Number::Int(i) => Ok(Value::Integer(i.into())),
+        sql::Number::Float(f) => Ok(Value::F64(f)),
+        sql::Number::Decimal(d) => {
+            // NOTE: Decimal-to-f64 loses precision (15-17 significant digits)
+            let s = d.to_string();
+            s.parse::<f64>()
+                .map(Value::F64)
+                .map_err(|e| format!("Failed to parse decimal '{}': {}", s, e))
+        }
+        _ => Err(format!("Unknown Number variant: {:?}", n)),
+    }
+}
+
+/// Convert a MessagePack Value into a SurrealDB SQL Value.
+pub fn to_surreal_value(v: Value) -> sql::Value {
+    to_surreal_value_with_hints(v, &HashSet::new())
+}
+
+/// Convert with explicit datetime field hints (backward compatibility)
+pub fn to_surreal_value_with_hints(v: Value, datetime_fields: &HashSet<String>) -> sql::Value {
+    let hints = TypeHints::from_datetime_fields_ref(datetime_fields);
+    to_surreal_value_with_type_hints(v, &hints)
+}
+
+/// Convert with full type hints support
+pub fn to_surreal_value_with_type_hints(v: Value, hints: &TypeHints) -> sql::Value {
+    match v {
+        Value::Nil => sql::Value::None,
+        Value::Boolean(b) => sql::Value::Bool(b),
+        Value::Integer(i) => convert_integer(i),
+        Value::F64(f) => sql::Value::from(f),
+        Value::F32(f) => sql::Value::from(f),
+        Value::String(s) => {
+            let str_val = match s.as_str() {
+                Some(v) => std::borrow::Cow::Borrowed(v),
+                None => String::from_utf8_lossy(s.as_bytes()),
+            };
+            sql::Value::from(str_val.as_ref())
+        }
+        Value::Binary(b) => sql::Value::Bytes(b.into()),
+        Value::Array(a) => {
+            let list: Vec<sql::Value> = a
+                .into_iter()
+                .map(|v| to_surreal_value_with_type_hints(v, hints))
+                .collect();
+            sql::Value::from(list)
+        }
+        Value::Map(m) => convert_map(m, hints),
+        Value::Ext(id, bytes) => convert_ext(id, bytes),
+    }
+}
+
+fn convert_integer(i: rmpv::Integer) -> sql::Value {
+    if let Some(val) = i.as_i64() {
+        sql::Value::from(val)
+    } else if let Some(val) = i.as_u64() {
+        // Large unsigned integers -> string to preserve value
+        sql::Value::from(val.to_string())
+    } else {
+        sql::Value::from(i.to_string())
+    }
+}
+
+fn convert_map(m: Vec<(Value, Value)>, hints: &TypeHints) -> sql::Value {
+    let mut map = std::collections::BTreeMap::new();
+    for (k, v) in m {
+        let key_str = match k {
+            Value::String(s) => s.into_str().unwrap_or_else(|| "INVALID_UTF8_KEY".to_string()),
+            Value::Binary(b) => String::from_utf8_lossy(&b).to_string(),
+            _ => k.to_string(),
+        };
+
+        let val = to_surreal_value_with_type_hints(v, hints);
+        let val = apply_type_hint(&key_str, val, hints);
+        map.insert(key_str, val);
+    }
+    sql::Value::from(map)
+}
+
+fn convert_ext(id: i8, bytes: Vec<u8>) -> sql::Value {
+    if id == -1 {
+        // MessagePack Timestamp Extension
+        parse_msgpack_timestamp(&bytes)
+            .map(sql::Value::from)
+            .unwrap_or(sql::Value::None)
+    } else {
+        log::warn!("Unknown MessagePack extension type: id={}, len={}", id, bytes.len());
+        sql::Value::Bytes(bytes.into())
+    }
+}
+
+/// Apply type hint conversions to a value based on its field name.
+///
+/// Record hints take precedence over datetime hints.
+fn apply_type_hint(field_name: &str, val: sql::Value, hints: &TypeHints) -> sql::Value {
+    let record_table = hints.record_fields.get(field_name);
+
+    // Warn on conflict
+    if record_table.is_some() && hints.datetime_fields.contains(field_name) {
+        if let Ok(mut warned) = hints.warned_conflicts.lock() {
+            if warned.insert(field_name.to_string()) {
+                log::warn!(
+                    "Field '{}' has both record and datetime hints. Datetime hint ignored.",
+                    field_name
+                );
+            }
+        }
+    }
+
+    // Record hint first
+    if let Some(table) = record_table {
+        return convert_to_record(val, table);
+    }
+
+    // Datetime hint
+    if hints.datetime_fields.contains(field_name) {
+        return convert_to_datetime(val);
+    }
+
+    val
+}
+
+/// Convert a value to record<table> type.
+pub fn convert_to_record(val: sql::Value, table: &str) -> sql::Value {
+    match val {
+        sql::Value::Strand(s) => {
+            // Parse "table:id" format or just "id"
+            let id_str = if s.0.contains(':') {
+                s.0.splitn(2, ':').nth(1).unwrap_or(&s.0).to_string()
+            } else {
+                s.0.clone()
+            };
+            sql::Value::Thing(sql::Thing::from((table.to_string(), id_str)))
+        }
+        sql::Value::Array(arr) => {
+            let converted: Vec<sql::Value> = arr
+                .into_iter()
+                .map(|v| convert_to_record(v, table))
+                .collect();
+            sql::Value::Array(converted.into())
+        }
+        _ => val,
+    }
+}
+
+/// Convert a value to datetime type.
+pub fn convert_to_datetime(val: sql::Value) -> sql::Value {
+    if let sql::Value::Strand(ref s) = val {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(s.as_str()) {
+            return sql::Value::from(dt.with_timezone(&chrono::Utc));
+        }
+    }
+    val
+}
+
+/// Parse MessagePack Timestamp Extension (-1) to chrono::DateTime
+fn parse_msgpack_timestamp(bytes: &[u8]) -> Option<chrono::DateTime<chrono::Utc>> {
+    match bytes.len() {
+        4 => {
+            // timestamp32: seconds in 32-bit unsigned int
+            let secs = u32::from_be_bytes(bytes.try_into().ok()?) as i64;
+            chrono::DateTime::from_timestamp(secs, 0)
+        }
+        8 => {
+            // timestamp64: nanosec in upper 30 bits, seconds in lower 34 bits
+            let val = u64::from_be_bytes(bytes.try_into().ok()?);
+            let nsec = (val >> 34) as u32;
+            let secs = (val & 0x3_FFFF_FFFF) as i64;
+            chrono::DateTime::from_timestamp(secs, nsec)
+        }
+        12 => {
+            // timestamp96: nanosec in first 4 bytes, seconds in last 8 bytes (signed)
+            let nsec = u32::from_be_bytes(bytes[0..4].try_into().ok()?);
+            let secs = i64::from_be_bytes(bytes[4..12].try_into().ok()?);
+            chrono::DateTime::from_timestamp(secs, nsec)
+        }
+        _ => {
+            log::warn!("Invalid MessagePack timestamp length: {}", bytes.len());
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_type_hints_parse() {
+        let hints = TypeHints::parse(&[
+            "created_at".to_string(),
+            "datetime:updated_at".to_string(),
+            "record:user:owner_id".to_string(),
+        ]);
+
+        assert!(hints.datetime_fields.contains("created_at"));
+        assert!(hints.datetime_fields.contains("updated_at"));
+        assert_eq!(hints.record_fields.get("owner_id"), Some(&"user".to_string()));
+    }
+
+    #[test]
+    fn test_round_trip() {
+        let original = Value::Array(vec![
+            Value::Boolean(true),
+            Value::Integer(123.into()),
+            Value::String("hello".into()),
+        ]);
+
+        let surreal = to_surreal_value(original.clone());
+        let back = from_surreal_value(surreal).unwrap();
+        assert_eq!(original, back);
+    }
+}

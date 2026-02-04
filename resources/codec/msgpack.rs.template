@@ -1,0 +1,80 @@
+//! MessagePack serialization utilities
+//!
+//! Provides convenience functions for MessagePack encoding/decoding.
+//! Uses rmp-serde for typed serialization and rmpv for dynamic values.
+
+use serde::{de::DeserializeOwned, Serialize};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum CodecError {
+    #[error("Serialization failed: {0}")]
+    Serialization(String),
+    #[error("Deserialization failed: {0}")]
+    Deserialization(String),
+}
+
+/// Serialize a value to MessagePack bytes (named format).
+///
+/// Uses named format to preserve field names, making debugging easier
+/// while still being more efficient than JSON.
+pub fn serialize<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
+    rmp_serde::to_vec_named(value).map_err(|e| CodecError::Serialization(e.to_string()))
+}
+
+/// Deserialize MessagePack bytes to a typed value.
+pub fn deserialize<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
+    rmp_serde::from_slice(bytes).map_err(|e| CodecError::Deserialization(e.to_string()))
+}
+
+/// Serialize a dynamic rmpv::Value to bytes.
+pub fn serialize_value(value: &rmpv::Value) -> Result<Vec<u8>, CodecError> {
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, value)
+        .map_err(|e| CodecError::Serialization(e.to_string()))?;
+    Ok(buf)
+}
+
+/// Deserialize bytes to a dynamic rmpv::Value.
+pub fn deserialize_value(bytes: &[u8]) -> Result<rmpv::Value, CodecError> {
+    rmpv::decode::read_value(&mut &bytes[..])
+        .map_err(|e| CodecError::Deserialization(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct TestStruct {
+        name: String,
+        count: i32,
+    }
+
+    #[test]
+    fn test_serialize_deserialize() {
+        let original = TestStruct {
+            name: "test".to_string(),
+            count: 42,
+        };
+
+        let bytes = serialize(&original).unwrap();
+        let restored: TestStruct = deserialize(&bytes).unwrap();
+
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_dynamic_value() {
+        let value = rmpv::Value::Array(vec![
+            rmpv::Value::Integer(1.into()),
+            rmpv::Value::String("hello".into()),
+        ]);
+
+        let bytes = serialize_value(&value).unwrap();
+        let restored = deserialize_value(&bytes).unwrap();
+
+        assert_eq!(value, restored);
+    }
+}

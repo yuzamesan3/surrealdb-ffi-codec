@@ -1,0 +1,15 @@
+//! FFI module for {{PROJECT_NAME}}
+//!
+//! Provides C ABI compatible functions for cross-language interoperability.
+//!
+//! # Safety
+//!
+//! All exported functions use raw pointers and must be called with valid
+//! memory. The caller is responsible for freeing allocated memory using
+//! the provided free functions.
+
+pub mod error_codes;
+pub mod wrapper;
+
+pub use error_codes::*;
+pub use wrapper::*;

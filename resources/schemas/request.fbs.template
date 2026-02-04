@@ -1,0 +1,83 @@
+// FlatBuffers schema for FFI requests
+// Replace {{NAMESPACE}} with your project namespace (e.g., myproject.ffi)
+
+namespace {{NAMESPACE}};
+
+/// Operation types for database interactions
+enum OperationType : byte {
+    Unknown = 0,
+    QuerySelect = 1,
+    QueryCreate = 2,
+    QueryUpdate = 3,
+    QueryDelete = 4,
+    QueryRaw = 5,
+    TransactionBegin = 10,
+    TransactionCommit = 11,
+    TransactionRollback = 12,
+}
+
+/// SELECT: Fixed schema only (zero-copy capable)
+table SelectRequest {
+    table_name: string (required);
+    record_id: string;  // optional: omit for all records
+}
+
+/// CREATE: Fixed schema + dynamic data
+table CreateRequest {
+    table_name: string (required);
+    data: [ubyte];  // MessagePack encoded user document
+    datetime_fields: [string];  // RFC3339 -> sql::Datetime
+    record_fields: [RecordFieldHint];  // -> record<table>
+}
+
+/// UPDATE: Fixed schema + dynamic data
+table UpdateRequest {
+    table_name: string (required);
+    record_id: string (required);
+    data: [ubyte];  // MessagePack encoded user document
+    datetime_fields: [string];
+    record_fields: [RecordFieldHint];
+}
+
+/// DELETE: Fixed schema only (zero-copy capable)
+table DeleteRequest {
+    table_name: string (required);
+    record_id: string (required);
+}
+
+/// Record field hint: maps parameter name to table for record<T> conversion
+table RecordFieldHint {
+    field: string (required);       // Parameter name (e.g., "owner_id")
+    table_name: string (required);  // Target table (e.g., "user")
+}
+
+/// RAW QUERY: Fixed schema + dynamic parameters
+table RawQueryRequest {
+    query: string (required);
+    params: [ubyte];  // MessagePack encoded parameters
+    datetime_fields: [string];
+    record_fields: [RecordFieldHint];
+}
+
+/// Transaction control (future extension)
+table TransactionRequest {
+    // Reserved for future use
+}
+
+/// Request payload union
+union RequestPayload {
+    SelectRequest,
+    CreateRequest,
+    UpdateRequest,
+    DeleteRequest,
+    RawQueryRequest,
+    TransactionRequest,
+}
+
+/// Request envelope
+table Request {
+    operation: OperationType;
+    payload: RequestPayload;
+}
+
+root_type Request;

@@ -1,0 +1,101 @@
+//! FFI Error codes
+//!
+//! Standard error codes for FFI responses.
+//! Positive values indicate application errors.
+//! -1 indicates a Rust panic.
+//! 0 indicates success.
+
+/// Error codes for FFI responses
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    /// Success (no error)
+    Success = 0,
+
+    /// Internal error (Rust panic)
+    InternalError = -1,
+
+    // === Request Errors (1xx) ===
+
+    /// Invalid FlatBuffers request
+    InvalidRequest = 100,
+    /// Missing required field
+    MissingField = 101,
+    /// Invalid field value
+    InvalidValue = 102,
+    /// Unsupported operation type
+    UnsupportedOperation = 103,
+
+    // === Database Errors (2xx) ===
+
+    /// Database connection error
+    DatabaseConnection = 200,
+    /// Query execution error
+    QueryError = 201,
+    /// Record not found
+    NotFound = 202,
+    /// Duplicate record
+    DuplicateRecord = 203,
+    /// Transaction error
+    TransactionError = 204,
+
+    // === Serialization Errors (3xx) ===
+
+    /// MessagePack serialization error
+    SerializationError = 300,
+    /// MessagePack deserialization error
+    DeserializationError = 301,
+    /// Type conversion error
+    TypeConversionError = 302,
+
+    // === Not Implemented (9xx) ===
+
+    /// Feature not implemented
+    NotImplemented = 999,
+}
+
+impl ErrorCode {
+    /// Get human-readable description
+    pub fn description(&self) -> &'static str {
+        match self {
+            ErrorCode::Success => "Success",
+            ErrorCode::InternalError => "Internal error (Rust panic)",
+            ErrorCode::InvalidRequest => "Invalid FlatBuffers request",
+            ErrorCode::MissingField => "Missing required field",
+            ErrorCode::InvalidValue => "Invalid field value",
+            ErrorCode::UnsupportedOperation => "Unsupported operation type",
+            ErrorCode::DatabaseConnection => "Database connection error",
+            ErrorCode::QueryError => "Query execution error",
+            ErrorCode::NotFound => "Record not found",
+            ErrorCode::DuplicateRecord => "Duplicate record",
+            ErrorCode::TransactionError => "Transaction error",
+            ErrorCode::SerializationError => "MessagePack serialization error",
+            ErrorCode::DeserializationError => "MessagePack deserialization error",
+            ErrorCode::TypeConversionError => "Type conversion error",
+            ErrorCode::NotImplemented => "Feature not implemented",
+        }
+    }
+}
+
+impl From<i32> for ErrorCode {
+    fn from(code: i32) -> Self {
+        match code {
+            0 => ErrorCode::Success,
+            -1 => ErrorCode::InternalError,
+            100 => ErrorCode::InvalidRequest,
+            101 => ErrorCode::MissingField,
+            102 => ErrorCode::InvalidValue,
+            103 => ErrorCode::UnsupportedOperation,
+            200 => ErrorCode::DatabaseConnection,
+            201 => ErrorCode::QueryError,
+            202 => ErrorCode::NotFound,
+            203 => ErrorCode::DuplicateRecord,
+            204 => ErrorCode::TransactionError,
+            300 => ErrorCode::SerializationError,
+            301 => ErrorCode::DeserializationError,
+            302 => ErrorCode::TypeConversionError,
+            999 => ErrorCode::NotImplemented,
+            _ => ErrorCode::InternalError,
+        }
+    }
+}

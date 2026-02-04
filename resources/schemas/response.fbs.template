@@ -1,0 +1,18 @@
+// FlatBuffers schema for FFI responses
+// Replace {{NAMESPACE}} with your project namespace (e.g., myproject.ffi)
+
+namespace {{NAMESPACE}};
+
+/// Response envelope
+///
+/// Status codes:
+///   0  = success, payload contains result data
+///  -1  = Rust panic (fatal error), payload contains error message
+///  >0  = Application error code, payload contains error details
+table Response {
+    status_code: int32 = 0;
+    payload: [ubyte];  // MessagePack encoded (result or error details)
+}
+
+root_type Response;
+file_identifier "RESP";

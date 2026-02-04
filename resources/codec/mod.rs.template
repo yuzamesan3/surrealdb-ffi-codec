@@ -1,0 +1,17 @@
+//! Codec module for {{PROJECT_NAME}}
+//!
+//! This module provides conversion utilities between SurrealDB types and MessagePack,
+//! along with FlatBuffers-generated request/response types.
+//!
+//! # Architecture
+//!
+//! ```text
+//! surrealdb::Value <-> sql::Value <-> rmpv::Value <-> [u8] (msgpack bytes)
+//!                                                         |
+//!                                                         v
+//!                                            FlatBuffers payload (embedded)
+//! ```
+
+pub mod converter;
+pub mod generated;
+pub mod msgpack;

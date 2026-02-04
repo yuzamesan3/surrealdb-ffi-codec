@@ -1,0 +1,221 @@
+//! FFI wrapper functions
+//!
+//! These functions provide C ABI compatible interfaces for database operations.
+//! Each function takes FlatBuffers-encoded request bytes and returns
+//! FlatBuffers-encoded response bytes.
+//!
+//! # Memory Management
+//!
+//! - Input buffers are borrowed (not owned)
+//! - Output buffers are allocated by Rust and must be freed by the caller
+//!   using `free_response_buffer`
+//!
+//! # Error Handling
+//!
+//! Errors are encoded in the response:
+//! - status_code = 0: success
+//! - status_code = -1: Rust panic (check payload for message)
+//! - status_code > 0: application error (see error_codes.rs)
+
+use crate::codec::generated::*;
+use crate::codec::{converter, msgpack};
+use flatbuffers::FlatBufferBuilder;
+use serde::Serialize;
+use std::panic;
+use std::slice;
+
+use super::error_codes::ErrorCode;
+
+/// FFI response buffer
+#[repr(C)]
+pub struct ResponseBuffer {
+    pub ptr: *mut u8,
+    pub len: usize,
+    pub cap: usize,
+}
+
+#[derive(Serialize)]
+struct ErrorPayload {
+    code: i32,
+    message: String,
+    details: Option<String>,
+}
+
+impl ResponseBuffer {
+    fn from_vec(v: Vec<u8>) -> Self {
+        let mut v = std::mem::ManuallyDrop::new(v);
+        Self {
+            ptr: v.as_mut_ptr(),
+            len: v.len(),
+            cap: v.capacity(),
+        }
+    }
+}
+
+/// Free a response buffer allocated by Rust
+///
+/// # Safety
+///
+/// Must be called with a valid ResponseBuffer obtained from an FFI call.
+/// Must not be called more than once for the same buffer.
+#[no_mangle]
+pub unsafe extern "C" fn free_response_buffer(buf: ResponseBuffer) {
+    if !buf.ptr.is_null() {
+        let _ = Vec::from_raw_parts(buf.ptr, buf.len, buf.cap);
+    }
+}
+
+/// Execute a database request
+///
+/// # Safety
+///
+/// - `request_ptr` must be a valid pointer to FlatBuffers-encoded request data
+/// - `request_len` must be the exact length of the request data
+///
+/// # Returns
+///
+/// A ResponseBuffer containing FlatBuffers-encoded response.
+/// Caller must free using `free_response_buffer`.
+#[no_mangle]
+pub unsafe extern "C" fn execute_request(
+    request_ptr: *const u8,
+    request_len: usize,
+) -> ResponseBuffer {
+    if request_ptr.is_null() || request_len == 0 {
+        return ResponseBuffer::from_vec(build_error_response(
+            ErrorCode::InvalidRequest as i32,
+            "request_ptr is null or request_len is 0",
+        ));
+    }
+
+    let result = panic::catch_unwind(|| {
+        let request_bytes = slice::from_raw_parts(request_ptr, request_len);
+        process_request(request_bytes)
+    });
+
+    match result {
+        Ok(response) => ResponseBuffer::from_vec(response),
+        Err(panic_info) => {
+            let msg = format!("Rust panic: {:?}", panic_info);
+            ResponseBuffer::from_vec(build_error_response(ErrorCode::InternalError as i32, &msg))
+        }
+    }
+}
+
+fn process_request(request_bytes: &[u8]) -> Vec<u8> {
+    // Verify FlatBuffers
+    let request = match flatbuffers::root::<Request>(request_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return build_error_response(
+                ErrorCode::InvalidRequest as i32,
+                &format!("Invalid FlatBuffers: {}", e),
+            );
+        }
+    };
+
+    // Dispatch based on operation type
+    match request.operation() {
+        OperationType::QuerySelect => handle_select(request),
+        OperationType::QueryCreate => handle_create(request),
+        OperationType::QueryUpdate => handle_update(request),
+        OperationType::QueryDelete => handle_delete(request),
+        OperationType::QueryRaw => handle_raw_query(request),
+        _ => build_error_response(
+            ErrorCode::UnsupportedOperation as i32,
+            "Unsupported operation type",
+        ),
+    }
+}
+
+fn handle_select(request: Request) -> Vec<u8> {
+    // TODO: Implement with your database instance
+    // Example:
+    // let payload = request.payload_as_select_request().unwrap();
+    // let table = payload.table_name();
+    // let record_id = payload.record_id();
+    // let result = db.select(table, record_id)?;
+    // let msgpack_bytes = converter::from_surreal_value(result)?;
+    // build_success_response(&msgpack_bytes)
+
+    build_error_response(ErrorCode::NotImplemented as i32, "SELECT not implemented")
+}
+
+fn handle_create(request: Request) -> Vec<u8> {
+    // TODO: Implement
+    build_error_response(ErrorCode::NotImplemented as i32, "CREATE not implemented")
+}
+
+fn handle_update(request: Request) -> Vec<u8> {
+    // TODO: Implement
+    build_error_response(ErrorCode::NotImplemented as i32, "UPDATE not implemented")
+}
+
+fn handle_delete(request: Request) -> Vec<u8> {
+    // TODO: Implement
+    build_error_response(ErrorCode::NotImplemented as i32, "DELETE not implemented")
+}
+
+fn handle_raw_query(request: Request) -> Vec<u8> {
+    // TODO: Implement with TypeHints
+    // Example:
+    // let payload = request.payload_as_raw_query_request().unwrap();
+    // let query = payload.query();
+    // let params_bytes = payload.params().unwrap_or_default();
+    // let datetime_fields: Vec<String> = payload.datetime_fields()
+    //     .map(|f| f.iter().map(|s| s.to_string()).collect())
+    //     .unwrap_or_default();
+    // let record_fields: Vec<String> = payload.record_fields()
+    //     .map(|r| {
+    //         r.iter()
+    //             .filter_map(|h| h.field().and_then(|f| h.table_name().map(|t| (f, t))))
+    //             .map(|(f, t)| format!("record:{}:{}", t, f))
+    //             .collect::<Vec<_>>()
+    //     })
+    //     .unwrap_or_default();
+    // let mut hint_list = datetime_fields;
+    // hint_list.extend(record_fields);
+    // let hints = TypeHints::parse(&hint_list);
+    // let params = converter::to_surreal_value_with_type_hints(
+    //     msgpack::deserialize_value(params_bytes)?,
+    //     &hints
+    // );
+    // let result = db.query(query).bind(params).await?;
+    // build_success_response(...)
+
+    build_error_response(ErrorCode::NotImplemented as i32, "RAW_QUERY not implemented")
+}
+
+fn build_success_response(payload: &[u8]) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::new();
+    let payload_vec = builder.create_vector(payload);
+    let response = Response::create(
+        &mut builder,
+        &ResponseArgs {
+            status_code: 0,
+            payload: Some(payload_vec),
+        },
+    );
+    builder.finish(response, Some("RESP"));
+    builder.finished_data().to_vec()
+}
+
+fn build_error_response(code: i32, message: &str) -> Vec<u8> {
+    let error_payload = msgpack::serialize(&ErrorPayload {
+        code,
+        message: message.to_string(),
+        details: None,
+    })
+    .unwrap_or_default();
+    let mut builder = FlatBufferBuilder::new();
+    let payload_vec = builder.create_vector(&error_payload);
+    let response = Response::create(
+        &mut builder,
+        &ResponseArgs {
+            status_code: code,
+            payload: Some(payload_vec),
+        },
+    );
+    builder.finish(response, Some("RESP"));
+    builder.finished_data().to_vec()
+}
