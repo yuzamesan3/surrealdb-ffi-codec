@@ -20,6 +20,29 @@ An efficient binary codec pattern for accessing SurrealDB Embedded from other la
 - Handling dynamic query results while preserving type safety
 - Requiring zero‑copy access through FlatBuffers
 
+## When NOT to Use
+
+- HTTP/WebSocket client implementations (use official SurrealDB SDKs)
+- Server-side API development without FFI requirements
+- Simple single-language Rust projects (use surrealdb crate directly)
+- MCP server implementations (this skill provides templates, not runtime)
+
+**Important**: This skill provides implementation **templates and guidelines only**, not executable binaries or runtime libraries.
+
+## Examples
+
+**User request**: "Create an FFI layer to access SurrealDB from Go"
+
+→ Generate Rust library with:
+- FlatBuffers schemas from `resources/schemas/`
+- Codec implementation from `resources/codec/`
+- C ABI wrapper from `resources/ffi/`
+- Go client code following `docs/integration_guide.md`
+
+**User request**: "Convert SurrealDB query results to MessagePack"
+
+→ Implement converter using `resources/codec/converter.rs.template` with proper TypeHints handling.
+
 ## Conversion Flow
 
 See `docs/design_principle.md` for detailed architecture. Summary:
