@@ -96,29 +96,65 @@ Copy templates from `resources/codec/` and customize:
 
 ## Step 4: Implement FFI Layer
 
-Copy templates from `resources/ffi/` and implement handlers:
+Copy templates from `resources/ffi/` and implement handlers.
+
+### Runtime & DB Instance Management
+
+FFI functions are called from non-async contexts. Use `OnceLock` to manage global singletons for the Tokio runtime and database connection:
 
 ```rust
-// In wrapper.rs
+// In wrapper.rs (or a dedicated globals.rs)
 
+use std::sync::OnceLock;
+use surrealdb::engine::local::{Db, Mem};  // or RocksDb for persistent
+use surrealdb::Surreal;
+use tokio::runtime::Runtime;
+
+// ─────────────────────────────────────────────────────────────────
+// Global Tokio Runtime (created once, reused for all FFI calls)
+// ─────────────────────────────────────────────────────────────────
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn get_runtime() -> &'static Runtime {
+    RUNTIME.get_or_init(|| {
+        Runtime::new().expect("Failed to create Tokio runtime")
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Global DB Instance (initialized once with namespace/database)
+// ─────────────────────────────────────────────────────────────────
+static DB: OnceLock<Surreal<Db>> = OnceLock::new();
+
+fn get_db_instance() -> &'static Surreal<Db> {
+    DB.get_or_init(|| {
+        get_runtime().block_on(async {
+            let db = Surreal::new::<Mem>(()).await.expect("Failed to create DB");
+            db.use_ns("app").use_db("main").await.expect("Failed to set namespace");
+            db
+        })
+    })
+}
+```
+
+### Handler Implementation
+
+```rust
 fn handle_select(request: Request) -> Vec<u8> {
     let payload = request.payload_as_select_request().unwrap();
     let table = payload.table_name();
     let record_id = payload.record_id();
 
-    // Get your database instance (global or passed via context)
     let db = get_db_instance();
 
-    // Execute query
-    let result = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(async {
-            if let Some(id) = record_id {
-                db.select((table, id)).await
-            } else {
-                db.select(table).await
-            }
-        });
+    // Use the global runtime instead of creating a new one each call
+    let result = get_runtime().block_on(async {
+        if let Some(id) = record_id {
+            db.select((table, id)).await
+        } else {
+            db.select(table).await
+        }
+    });
 
     match result {
         Ok(records) => {

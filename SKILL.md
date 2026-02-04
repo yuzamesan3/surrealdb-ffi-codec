@@ -9,7 +9,9 @@ description: A codec implementation pattern for high‑efficiency FFI data excha
 
 An efficient binary codec pattern for accessing SurrealDB Embedded from other languages (Go, Swift, Kotlin, etc.) via FFI.
 
-**Core principle**: eliminate JSON and optimize with a two‑layer structure: FlatBuffers (fixed schema) + MessagePack (dynamic schema).
+**Core principle**: eliminate JSON and optimize with a two‑layer structure:
+- **FlatBuffers**: fixed schema (error codes, status, operation types)
+- **MessagePack**: dynamic schema (query results, parameters)
 
 ## When to Use
 
@@ -18,50 +20,28 @@ An efficient binary codec pattern for accessing SurrealDB Embedded from other la
 - Handling dynamic query results while preserving type safety
 - Requiring zero‑copy access through FlatBuffers
 
-## Core Design Principle
+## Conversion Flow
 
-| Data characteristics | Serialization | Examples |
-|----------------------|---------------|----------|
-| Fixed schema | FlatBuffers only | Error codes, status, operation types |
-| Dynamic schema | FlatBuffers + embedded MessagePack | Query results, dynamic parameters |
-
-## Conversion Flow (JSON Elimination)
+See `docs/design_principle.md` for detailed architecture. Summary:
 
 ```
-surrealdb::Value (query result)
-    | .into_inner()
-    v
-sql::Value (core layer)
-    | from_surreal_value()
-    v
-rmpv::Value (MessagePack value)
-    | serialize_to_msgpack()
-    v
-[u8] bytes (embedded in FlatBuffers payload)
+sql::Value → rmpv::Value → [u8] bytes (in FlatBuffers payload)
 ```
 
 ## Type Mapping
 
-| SurrealDB sql::Value | MessagePack rmpv::Value | Notes |
-|----------------------|-------------------------|-------|
-| None / Null | Nil | - |
-| Bool | Boolean | - |
-| Number::Int | Integer | - |
-| Number::Float | F64 | - |
-| Number::Decimal | F64 | Precision loss (15–17 digits) |
-| Strand | String | - |
-| Datetime | String | RFC3339, remove `d'...'` |
-| Duration | String | - |
-| Uuid | String | - |
-| Thing | String | ID only, remove brackets |
-| Array | Array | Recursive conversion |
-| Object | Map | Recursive conversion |
-| Bytes | Binary | - |
-| Others | String | to_string() |
+See `docs/conversion_table.md` for the complete type conversion reference.
+
+Key points:
+- `sql::Number::Decimal` → `f64` (precision loss beyond 15-17 digits)
+- `sql::Datetime` → RFC3339 string (remove `d'...'` wrapper)
+- `sql::Thing` → ID-only string (remove table prefix and brackets)
 
 ## Instructions
 
-### Step 1: Confirm Project Layout
+### Project Layout
+
+Generate the following structure:
 
 ```
 rust_lib/
@@ -69,45 +49,32 @@ rust_lib/
 ├── schemas/
 │   ├── request.fbs
 │   └── response.fbs
-├── src/
-│   ├── lib.rs
-│   ├── codec/
-│   │   ├── mod.rs
-│   │   ├── converter.rs
-│   │   ├── msgpack.rs
-│   │   └── generated/
-│   │       ├── mod.rs
-│   │       ├── request_generated.rs
-│   │       └── response_generated.rs
-│   └── ffi/
-│       ├── mod.rs
-│       ├── wrapper.rs
-│       └── error_codes.rs
+└── src/
+    ├── lib.rs
+    ├── codec/
+    │   ├── mod.rs
+    │   ├── converter.rs
+    │   ├── msgpack.rs
+    │   └── generated/
+    └── ffi/
+        ├── mod.rs
+        ├── wrapper.rs
+        └── error_codes.rs
 ```
 
-### Step 2: Implement Using Templates
+### Implementation
 
-Use templates under `resources/` and customize for your project.
+1. **FlatBuffers schemas** - Use `resources/schemas/*.fbs.template`, replace `{{NAMESPACE}}`
+2. **Codec** - Use `resources/codec/*.rs.template` for type conversion
+3. **FFI wrapper** - Use `resources/ffi/*.rs.template` for C ABI exports
 
-1. **FlatBuffers schemas** (`resources/schemas/`)
-   - Replace `{{NAMESPACE}}` with your project namespace
-   - Define operation types
-
-2. **Codec implementation** (`resources/codec/`)
-   - Type conversion logic
-   - Field‑level typing via `TypeHints`
-
-3. **FFI wrapper** (`resources/ffi/`)
-   - C ABI exports
-   - Error codes
-
-### Step 3: Generate FlatBuffers Code
+### FlatBuffers Code Generation
 
 ```bash
 flatc --rust -o src/codec/generated schemas/request.fbs schemas/response.fbs
 ```
 
-### Step 4: Cargo.toml Dependencies
+### Dependencies
 
 ```toml
 [dependencies]
@@ -180,16 +147,3 @@ Use a structured MessagePack payload on error:
 ```
 
 Clients should ignore unknown fields for forward compatibility.
-
-## Resources
-
-- `resources/codec/` - Rust codec implementation templates
-- `resources/ffi/` - FFI wrapper templates
-- `resources/schemas/` - FlatBuffers schema templates
-- `docs/` - detailed design documents
-
-## See Also
-
-- [FlatBuffers Documentation](https://flatbuffers.dev/)
-- [MessagePack Specification](https://msgpack.org/)
-- [SurrealDB SQL Types](https://surrealdb.com/docs/surrealql/datamodel)
