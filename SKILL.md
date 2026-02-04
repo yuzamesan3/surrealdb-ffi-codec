@@ -144,6 +144,12 @@ let clean_id = id.trim_matches(|c| c == '\u{27E8}' || c == '\u{27E9}');
 - status_code = -1: Rust panic (fatal)
 - status_code > 0: application error
 
+All FFI functions must wrap logic with `std::panic::catch_unwind` to prevent panics from crossing the FFI boundary.
+
+### Async Runtime Management
+
+FFI functions are synchronous but SurrealDB SDK is async. Use `OnceLock` for global runtime singleton. See `docs/integration_guide.md` for the complete pattern.
+
 ### Applying RecordFieldHint
 
 FlatBuffers `record_fields: [RecordFieldHint]` should be mapped into `TypeHints.record_fields`.
